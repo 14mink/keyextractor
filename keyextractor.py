@@ -27,7 +27,7 @@ def extract_mnemonic_regex(file_path):
         print(f"[*] Verifying {len(mnemonic_candidates)} artifacts...")
         unverified_candidates = []
         for i in range(len(mnemonic_candidates)):
-            print(f"\nVerifying Candidate [{i}] -> [{mnemonic_candidates[i]}]...")
+            #print(f"\nVerifying Candidate [{i}] -> [{mnemonic_candidates[i]}]...")
             try:
                 key = WalletKey(mnemonic=mnemonic_candidates[i].decode())
             except Exception as e:
@@ -40,7 +40,7 @@ def extract_mnemonic_regex(file_path):
             else :
                 unverified_candidates.append(mnemonic_candidates[i])
                 continue
-                print("Failed to Verify")
+                #print("Failed to Verify")
         if len(unverified_candidates) > 0:
             unverified_candidates = list(set(unverified_candidates))
             print(f'[*] {len(unverified_candidates)} valid but unverified mnemonic code(s).')
