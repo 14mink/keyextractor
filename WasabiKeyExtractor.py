@@ -1,5 +1,6 @@
 from WalletKey import *
 from KeyExtractor import *
+import base64
 
 class WasabiKeyExtractor(KeyExtractor):
     def __init__(self,mem):
