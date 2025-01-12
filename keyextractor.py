@@ -1,158 +1,112 @@
-import re
-import sys
-import base64
-import math
-import hmac
-import binascii
+from WalletKey import *
 from collections import Counter
-from binascii import hexlify, unhexlify
-from btclib import bip32, mnemonic
-from btclib.mnemonic import bip39
-from btclib.network import NETWORKS
 from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import unpad
-import base58
-import argparse
+import math
+import re
 
-def extract_mnemonic_regex(file_path):
-    with open(file_path, 'rb') as f:
-        print(f"[*] Reading {file_path}...")
-        file = f.read() 
+class KeyExtractor():
+    def __init__(self,mem):
+        self.mem = mem
+        self.keys = []
+    
+    def run(self):
+        candidates = self.extract()
+        self.verify(candidates)
 
-        print("[*] Searching for mnemonic code...")
-        MNEMONIC_REGEX=b'[a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}'
-        mnemonic_candidates = list(set(regex_search(file,MNEMONIC_REGEX)))
-
-        print(f"[*] Verifying {len(mnemonic_candidates)} artifacts...")
+    def extract(self):
+        mnemonic_candidates = list(set(regex_search(self.mem,MNEMONIC_REGEX)))
+        return mnemonic_candidates
+    
+    def validate(self, candidate):
+        print(f"\nverifying artifact: [{candidate}]...")
+        try:
+            key = WalletKey(mnemonic=candidate.decode())
+        except Exception as e:
+            print(e)
+            return
+        return key
+                
+    def verify(self, candidates):
         unverified_candidates = []
-        for i in range(len(mnemonic_candidates)):
-            #print(f"\nVerifying Candidate [{i}] -> [{mnemonic_candidates[i]}]...")
-            try:
-                key = WalletKey(mnemonic=mnemonic_candidates[i].decode())
-            except Exception as e:
-                #print(e)
-                print("Invalid Mnemonic Code")
-                continue
-            if verify_key(file, key):
+        for candidate in candidates:
+            key = self.validate(candidate)
+            if not key: continue
+            
+            if self.verify_key(key):
+                print("\tVerified !")
                 key.print_keys()
                 break
             else :
-                unverified_candidates.append(mnemonic_candidates[i])
+                unverified_candidates.append(candidate)
                 continue
-                #print("Failed to Verify")
-        if len(unverified_candidates) > 0:
+                
+        if unverified_candidates:
             unverified_candidates = list(set(unverified_candidates))
             print(f'[*] {len(unverified_candidates)} valid but unverified mnemonic code(s).')
-            for i in range(len(unverified_candidates)):
-                print(f'\t({i+1}) {unverified_candidates[i].decode()}')
+            for idx, unverified_candidate in enumerate(unverified_candidates):
+                print(f'\t({idx+1}) {unverified_candidate.decode()}')
 
+    def verify_key(self, key: WalletKey):
+        if key.candidate == ENTROPY :
+            if self.search_verifying_artifact(key.mnemonic, MNEMONIC_CODE): return True
+            if self.search_verifying_artifact(key.seed, MASTER_SEED): return True
+            if self.search_verifying_artifact(key.ecprv, MASTER_PRIVATE_KEY): return True
+            if self.search_verifying_artifact(key.chaincode, MASTER_CHAIN_CODE): return True
+            if self.search_verifying_artifact(key.btc_acc_xpubs, ACCOUNT_EXT_PUBLIC_KEY): return True
+        
+        if key.candidate == MNEMONIC_CODE :
+            if self.search_verifying_artifact(key.entropy, ENTROPY): return True
+            if self.search_verifying_artifact(key.seed, MASTER_SEED): return True
+            if self.search_verifying_artifact(key.ecprv, MASTER_PRIVATE_KEY): return True
+            if self.search_verifying_artifact(key.chaincode, MASTER_CHAIN_CODE): return True
+            if self.search_verifying_artifact(key.btc_acc_xpubs, ACCOUNT_EXT_PUBLIC_KEY): return True 
+
+        if key.candidate == MASTER_SEED:
+            if self.search_verifying_artifact(key.ecprv, MASTER_PRIVATE_KEY): return True
+            if self.search_verifying_artifact(key.chaincode, MASTER_CHAIN_CODE): return True
+            if self.search_verifying_artifact(key.btc_acc_xpubs, ACCOUNT_EXT_PUBLIC_KEY): return True 
+
+        if key.candidate == ECPRV_CC:
+            if self.search_verifying_artifact(key.btc_acc_xpubs, ACCOUNT_EXT_PUBLIC_KEY): return True 
+
+        return False  
+
+    def search_verifying_artifact(self, artifact, artifact_type):
+        print(f"\tsearching for {artifact_type}...")
+
+        if artifact_type == MNEMONIC_CODE:
+            offset = search_pattern(self.mem, artifact.encode())[0]
+            if offset != -1:
+                print(f"\t{artifact_type}({artifact}) found at offset {hex(offset)}")
+                return True
             
-def extract_wasabi(file_path):
-    with open(file_path, 'rb') as f:
-        print(f"[*] Reading {file_path}...")
-        file = f.read() 
-
-        print("[*] Searching for master chain code...")
-        WASABI_PATTERN_1 = b'"ChainCode": "'
-        chaincode = base64.b64decode(extract_key(file, WASABI_PATTERN_1, extract_type="END_PATTERN", end_pattern='"'))
-        chaincode_hex = chaincode.hex()
-        
-        print("[*] Searching for master private key...")
-        WASABI_PATTERN_2 = chaincode
-        ecprv_candidates, _ = sort_by_entropy(extract_key(file, WASABI_PATTERN_2, extract_type="OFFSET", distance=-0x184, length=0x20, search_all=True, reverse=True))
-        
-        #print("\npossible master private key list")
-        #for i in range(len(ecprv_candidates)):
-        #    print(f'\t[{i}] : {ecprv_candidates[i].hex()}')
-
-        print("[*] Verifying artifacts...")
-        for i in range(len(ecprv_candidates)):
-            #print(f"\nverifying artifact [{i}]...")
-            key = WalletKey(ecprv=ecprv_candidates[i], chaincode=chaincode)
-
-            if verify_key(file, key):
-                key.print_keys()
-                break
-            else :
-                continue
-                #print("failed to verify")
+        elif artifact_type == ENTROPY or artifact_type == MASTER_SEED or artifact_type == MASTER_CHAIN_CODE or artifact_type == MASTER_PRIVATE_KEY:
+            offset = search_pattern(self.mem, artifact)[0]
+            if offset != -1:
+                print(f"\t{artifact_type}({artifact.hex()}) found at offset {hex(offset)}")
+                return True
             
-def extract_whirlpool(file_path):
-    with open(file_path, 'rb') as f:
-        print(f"[*] Reading {file_path}...")
-        file = f.read() 
+        elif artifact_type == ACCOUNT_EXT_PUBLIC_KEY:
+            for xpub in artifact:
+                #print(f'xpub : {xpub}')
+                offset = search_pattern(self.mem, xpub.encode())[0]
+                if offset != -1:
+                    print(f"\t{artifact_type}({xpub}) found at offset {hex(offset)}")
+                    return True 
 
-        print("[*] Searching for bip39 passphrase...")
-        WHIRLPOOL_PATTERN_1 = b'{"seedPassphrase":"'
-        passphrase = (extract_key(file, WHIRLPOOL_PATTERN_1, extract_type="END_PATTERN", end_pattern = '"')).decode('utf-8')
 
-        print("[*] Searching for mnemonic code...")
-        MNEMONIC_REGEX=b'[a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}[ ][a-z]{3,8}'
-        mnemonic_candidates = regex_search(file,MNEMONIC_REGEX)
+def sort_by_entropy(list):
+    entropy_values = [(hex_value, get_entropy(hex_value)) for hex_value in list]
+    sorted_entropy_values = sorted(entropy_values, key=lambda x: x[1], reverse=True)
+    sorted_hex_values = [hex_value for hex_value, _ in sorted_entropy_values]
+    return sorted_hex_values, sorted_entropy_values
 
-        print("[*] Verifying artifacts...")
-        for i in range(len(mnemonic_candidates)):
-        
-            try:
-                key = WalletKey(mnemonic=mnemonic_candidates[i].decode(), passphrase=passphrase)
-            except:
-                continue
-
-            if verify_key(file, key):
-                key.print_keys()
-                break
-
-            else :
-                continue
-                #print("Failed to Verify")
-
-def extract_coinomi(file_path):
-    with open(file_path, 'rb') as f:
-        print(f"[*] Reading {file_path}...")
-        file = f.read() 
-        
-        #object_header=b'\x01\x00\x00\x00\x00\x00\x00\x00\xf5\x00\x00\x20'
-        
-        print("[*] Searching for object header...")
-        COINOMI_PATTERN_HEADER = b'\x07\x00\x00\x00mandate'
-        object_header = extract_key(file, COINOMI_PATTERN_HEADER, extract_type="OFFSET", distance=-0xc, length=0xc)[1:]
-        
-        aeskey_candidates, hdkey_candidates, priv_cc_candidates = [], [], []
-        aeskey_offset, iv_offset, enc_priv_offset, cc_offset = 0x10, 0x10, 0x30, 0x70
-        aeskey_len, iv_len, enc_priv_len, cc_len = 0x20, 0x10, 0x30, 0x20
-        
-        print("[*] Searching for aeskey...")
-        COINOMI_PATTERN_AESKEY = b'.'+ object_header + b'\x20\x00\x00\x00.{32}.{24}' + b'.'+object_header + b'\x20\x00\x00\x00.{32}.{16}' + b'.'+object_header + b'.\x00\x00\x00'
-        aeskey_matched_list = list(set(regex_search(file,COINOMI_PATTERN_AESKEY)))
-        
-        for aeskey_matched in aeskey_matched_list:
-            aeskey_candidates.append(aeskey_matched[aeskey_offset:aeskey_offset+aeskey_len])
-        aeskey_candidates = list(set(aeskey_candidates))
-
-        print("[*] Searching for deterministickey...")
-        COINOMI_PATTERN_HDKEY = b'.'+object_header + b'\x10\x00\x00\x00.{16}' + b'.'+object_header + b'\x30\x00\x00\x00.{48}' + b'.'+ object_header + b'\x20\x00\x00\x00.{32}'
-        hdkey_matched_list = list(set(regex_search(file,COINOMI_PATTERN_HDKEY)))
-
-        for hdkey_matched in hdkey_matched_list:
-            hdkey_candidates.append({"iv" : hdkey_matched[iv_offset:iv_offset+iv_len], "enc_priv" : hdkey_matched[enc_priv_offset:enc_priv_offset+enc_priv_len], "cc" : hdkey_matched[cc_offset:cc_offset+cc_len]})
-
-        for aeskey in aeskey_candidates:
-            for hdkey in hdkey_candidates:
-                priv_cc_candidates.append({"ecprv" : aes_cbc_256_decrypt(hdkey["enc_priv"], aeskey, hdkey["iv"]), "cc": hdkey["cc"]})
-
-        print(f"[*] Verifying {len(priv_cc_candidates)} artifacts...")
-        for i in range(len(priv_cc_candidates)):
-            #print(f"\nverifying artifact [{i}]...")
-            #print(f'ecprv={priv_cc_candidates[i]["ecprv"].hex()}')
-            key = WalletKey(ecprv=priv_cc_candidates[i]["ecprv"], chaincode=priv_cc_candidates[i]["cc"])
-
-            if verify_key(file, key):
-                key.print_keys()
-                break
-            else :
-                continue
-                #print(f"failed to verify artifact[{i}]")
+def get_entropy(data):
+    byte_frequency = Counter(data)
+    probabilities = [count / len(data) for count in byte_frequency.values()]
+    entropy = -sum(p * math.log2(p) for p in probabilities if p != 0)
+    return entropy
 
 def aes_cbc_256_decrypt(ciphertext, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
@@ -163,357 +117,3 @@ def regex_search(file, regex):
     pattern_bytes = re.compile(regex)
     matches = pattern_bytes.findall(file)
     return matches
-
-def calculate_entropy(binary_data):
-    # Calculate frequency of each byte
-    byte_frequency = Counter(binary_data)
-    
-    # Calculate probability of each byte
-    total_bytes = len(binary_data)
-    probabilities = [count / total_bytes for count in byte_frequency.values()]
-    
-    # Calculate entropy
-    entropy = -sum(p * math.log2(p) for p in probabilities if p != 0)
-    
-    return entropy
-
-
-def sort_by_entropy(list):
-    entropy_values = [(hex_value, calculate_entropy(hex_value)) for hex_value in list]
-    sorted_entropy_values = sorted(entropy_values, key=lambda x: x[1], reverse=True)
-    sorted_hex_values = [hex_value for hex_value, _ in sorted_entropy_values]
-    return sorted_hex_values, sorted_entropy_values
-
-
-def search_pattern(file, pattern, search_all=False):
-    offset_list = []
-    offset = file.find(pattern)
-
-    #if offset == -1:
-    #    print("\t\tPattern",pattern.hex,"not found.")
-    
-    offset_list.append(offset)
-    
-    if search_all:
-        while True:
-            offset = file.find(pattern, offset + 1)
-            if offset == -1:
-                break
-            offset_list.append(offset)
-
-    return offset_list
-
-
-def extract_key(file, pattern, search_all=False, extract_type='', end_pattern=0, distance=0, length=0, reverse=False):
-    extracted_value_list = []
-    offset_list = search_pattern(file, pattern, search_all=search_all)
-    if offset_list[0] == -1:
-        sys.exit()
-    
-    if extract_type == "END_PATTERN":
-        for i in range(len(offset_list)):
-            end_idx = file.find(end_pattern.encode(), offset_list[i] + len(pattern))
-            if reverse == True:
-                extracted_value = file[offset_list[i] + len(pattern):end_idx][::-1]
-            else :
-                extracted_value = file[offset_list[i] + len(pattern):end_idx]
-            extracted_value_list.append(extracted_value)
-
-    if extract_type == "OFFSET":
-        for i in range(len(offset_list)):
-            start_idx = offset_list[i] + distance 
-            if reverse == True:
-                extracted_value = file[start_idx : start_idx + length][::-1]
-            else :
-                extracted_value = file[start_idx : start_idx + length]
-            extracted_value_list.append(extracted_value)
-    
-    dedup_extracted_value_list = list(set(extracted_value_list))
-    if search_all==False:
-        return dedup_extracted_value_list[0]
-    return dedup_extracted_value_list
-
-def mnemonic_from_entropy(entropy):
-    mnemonic = bip39.mnemonic_from_entropy(entropy)
-    return mnemonic
-
-def entropy_from_mnemonic(mnemonic):
-    entropy = bip39.entropy_from_mnemonic(mnemonic)
-    hex_bytes = bytes([int(entropy[i:i+8], 2) for i in range(0, len(entropy), 8)])
-    return hex_bytes
-
-def seed_from_mnemonic(mnemonic, passphrase=""):
-    seed = bip39.seed_from_mnemonic(mnemonic, passphrase)
-    return seed
-
-def key_from_seed(seed):
-    hmac_ = hmac.new(b"Bitcoin seed", seed, "sha512").digest()
-    ecprv = hmac_[:32]
-    chaincode=hmac_[32:]
-    xprv = bip32.rootxprv_from_seed(seed)
-    return (ecprv, chaincode, xprv)
-
-
-def xprv_from_ecprv_cc(ecprv, chaincode):
-    network = NETWORKS["mainnet"]
-    xkey_data = bip32.BIP32KeyData(
-        version=network.bip32_prv,
-        depth=0,
-        parent_fingerprint=b'\x00'*4,
-        index=0,
-        chain_code=chaincode,
-        key=b'\x00'+ecprv,
-    )
-    xprv = xkey_data.b58encode()
-    return xprv
-
-
-def account_xpub_from_xprv(xprv, derivation_path):             
-    account_xprv = bip32.derive(xprv, derivation_path)
-    account_xpub = bip32.xpub_from_xprv(account_xprv)
-    return account_xpub
-
-def account_cc_from_xprv(xprv, derivation_path):
-    account_xprv = bip32.derive(xprv, derivation_path)
-    account_xprv_bytes=base58.b58decode(account_xprv)
-    account_cc = account_xprv_bytes[13:45]
-    return account_cc
-
-class WalletKey:
-
-    def __init__(self, entropy='', mnemonic='', passphrase='', seed=b'', xprv='', ecprv=b'', chaincode=b'', account_path=''):
-        self.entropy = entropy
-        self.mnemonic = mnemonic
-        self.passphrase = passphrase
-        self.seed = seed
-        self.xprv = xprv
-        self.ecprv = ecprv
-        self.chaincode = chaincode
-        #self.account_path = account_path
-        #self.account_xpub = ''
-        #self.account_cc = b''
-        self.btc_account_32_xpub = ""
-        self.btc_account_44_xpub = ""
-        self.btc_account_49_xpub = ""
-        self.btc_account_84_xpub = ""
-        self.btc_account_32_cc = ""
-        self.btc_account_44_cc = ""
-        self.btc_account_49_cc = ""
-        self.btc_account_84_cc = ""
-        self.candidate = ""
-
-        if entropy:
-            self.mnemonic = mnemonic_from_entropy(entropy)
-            self.seed = seed_from_mnemonic(self.mnemonic,passphrase)
-            self.ecprv, self.chaincode, self.xprv = key_from_seed(self.seed)
-            self.candidate = "entropy"
-        
-        if mnemonic:
-            self.entropy = entropy_from_mnemonic(mnemonic)
-            self.seed = seed_from_mnemonic(mnemonic,passphrase)
-            self.ecprv, self.chaincode, self.xprv = key_from_seed(self.seed)
-            self.candidate = "mnemonic"
-
-        if seed:
-            self.ecprv, self.chaincode, self.xprv = key_from_seed(seed)
-            self.candidate = "seed"
-
-        if ecprv and chaincode:
-            self.xprv = xprv_from_ecprv_cc(ecprv, chaincode)
-            self.candidate = "ecprv_cc"
-        
-        # if account_path:
-        #     self.account_xpub = account_xpub_from_xprv(self.xprv, account_path)
-        #     self.account_cc = account_cc_from_xprv(self.xprv, account_path)
-        self.btc_account_32_xpub = account_xpub_from_xprv(self.xprv,"m/32'/0'/0'/0")
-        self.btc_account_44_xpub = account_xpub_from_xprv(self.xprv,"m/44'/0'/0'/0")
-        self.btc_account_49_xpub = account_xpub_from_xprv(self.xprv,"m/49'/0'/0'/0")
-        self.btc_account_84_xpub = account_xpub_from_xprv(self.xprv,"m/84'/0'/0'/0")
-        self.btc_account_32_cc = account_cc_from_xprv(self.xprv,"m/32'/0'/0'/0")
-        self.btc_account_44_cc = account_cc_from_xprv(self.xprv,"m/44'/0'/0'/0")
-        self.btc_account_49_cc = account_cc_from_xprv(self.xprv,"m/49'/0'/0'/0")
-        self.btc_account_84_cc = account_cc_from_xprv(self.xprv,"m/84'/0'/0'/0")        
-
-
-    def print_keys(self):
-        print("\n[+] Wallet info")
-        #if self.entropy:
-            #print(f"\tentropy : {self.entropy.hex()}")
-        if self.mnemonic:
-            print(f"\tmnemonic code : {self.mnemonic}")
-        if self.passphrase:
-            print(f"\tbip39 passphrase : {self.passphrase}")
-        #if self.seed:
-            #print(f"\tmaster seed : {self.seed.hex()}")
-        if self.xprv:
-            print(f"\tmaster xprv : {self.xprv}")
-        #if self.ecprv:
-            #print(f"\tmaster private key : {self.ecprv.hex()}")
-        #if self.chaincode:
-            #print(f"\tmaster chain code : {self.chaincode.hex()}")
-        #if self.account_xpub:
-            #print(f"\taccount xpub : {self.account_xpub}")
-        print("\n")
-
-
-def verify_key(file, key: WalletKey):
-    if key.candidate == "entropy" :
-        print(f"\tsearching for mnemonic code...")
-        offset = search_pattern(file, key.mnemonic.encode())[0]
-        if offset != -1:
-           print(f"\tmnemonic code({key.mnemonic}) found at offset {hex(offset)}")
-           return True
-
-        #print(f"\tsearching for master seed...")
-        offset = search_pattern(file, key.seed)[0]
-        if offset != -1:
-            print(f"\tmaster seed({key.seed.hex()}) found at offset {hex(offset)}")
-            return True
-
-        #print(f"\tsearching for master private key...")
-        offset = search_pattern(file, key.ecprv)[0]
-        if offset != -1:
-            print(f"\tmaster private key({key.ecprv.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        #print(f"\tsearching for master chain code...")
-        offset = search_pattern(file, key.chaincode)[0]
-        if offset  != -1:
-            print(f"\tmaster chain code({key.chaincode.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        # #print(f"\tsearching for account xpub...")
-        # offset = search_pattern(file, key.account_xpub.encode())[0]
-        # if offset != -1:
-        #     print(f"\taccount xpub({key.account_xpub}) found at offset {hex(offset)}")
-        #     return True
-
-        print(f"\tsearching for account xpub...")
-        xpub_list = [key.btc_account_32_xpub, key.btc_account_44_xpub, key.btc_account_49_xpub, key.btc_account_84_xpub]
-        for xpub in xpub_list:
-            offset = search_pattern(file, xpub.encode())[0]
-            if offset != -1:
-                print(f"\taccount xpub({xpub}) found at offset {hex(offset)}")
-                return True 
-        
-    if key.candidate == "mnemonic":
-        #print(f"\tsearching for entropy...")
-        offset = search_pattern(file, key.entropy)[0]
-        if offset != -1:
-            print(f"\tentropy({key.entropy.hex()}) found at offset {hex(offset)}")
-            return True
-
-        #print(f"\tsearching for master seed...")
-        offset = search_pattern(file, key.seed)[0]
-        if offset != -1:
-            print(f"\tseed({key.seed.hex()}) found at offset {hex(offset)}")
-            return True
-
-        #print(f"\tsearching for master private key...")
-        offset = search_pattern(file, key.ecprv)[0]
-        if offset != -1:
-            print(f"\tmaster private key({key.ecprv.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        #print(f"\tsearching for master chain code...")
-        offset = search_pattern(file, key.chaincode)[0]
-        if offset  != -1:
-            print(f"\tmaster chain code({key.chaincode.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        # print(f"\tsearching for account xpub...")
-        # offset = search_pattern(file, key.account_xpub.encode())[0]
-        # if offset != -1:
-        #     print(f"\taccount xpub({key.account_xpub}) found at offset {hex(offset)}")
-        #     return True
-
-        #print(f"\tsearching for account xpub...")
-        xpub_list = [key.btc_account_32_xpub, key.btc_account_44_xpub, key.btc_account_49_xpub, key.btc_account_84_xpub]
-        for xpub in xpub_list:
-            offset = search_pattern(file, xpub.encode())[0]
-            if offset != -1:
-                print(f"\taccount xpub({xpub}) found at offset {hex(offset)}")
-                return True       
-    
-    if key.candidate == "seed":
-        #print(f"\tsearching for master private key...")
-        offset = search_pattern(file, key.ecprv)[0]
-        if offset != -1:
-            print(f"\tmaster private key({key.ecprv.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        #print(f"\tsearching for master chain code...")
-        offset = search_pattern(file, key.chaincode)[0]
-        if offset  != -1:
-            print(f"\tmaster chain code({key.chaincode.hex()}) found at offset {hex(offset)}")
-            return True
-        
-        # #print(f"\tsearching for account xpub...")
-        # offset = search_pattern(file, key.account_xpub.encode())[0]
-        # if offset != -1:
-        #     print(f"\taccount xpub({key.account_xpub}) found at offset {hex(offset)}")
-        #     return True
-
-        print(f"\tsearching for account xpub...")
-        xpub_list = [key.btc_account_32_xpub, key.btc_account_44_xpub, key.btc_account_49_xpub, key.btc_account_84_xpub]
-        for xpub in xpub_list:
-            offset = search_pattern(file, xpub.encode())[0]
-            if offset != -1:
-                print(f"\taccount xpub({xpub}) found at offset {hex(offset)}")
-                return True
-    
-    if key.candidate == "ecprv_cc":
-        #print(f"\tsearching for account xpub...")
-        offset = search_pattern(file, key.account_xpub.encode())[0]
-        if offset != -1:
-            print(f"\taccount xpub({key.account_xpub}) found at offset {hex(offset)}")
-            return True
-        
-        # #print(f"\tsearching for account private key...")
-        # offset = search_pattern(file, key.account_cc)[0]
-        # if offset != -1:
-        #     print(f"\taccount chain code({key.account_cc.hex()}) found at offset {hex(offset)}")
-        #     return True
-        
-        print(f"\tsearching for account xpub...")
-        xpub_list = [key.btc_account_32_xpub, key.btc_account_44_xpub, key.btc_account_49_xpub, key.btc_account_84_xpub]
-        for xpub in xpub_list:
-            offset = search_pattern(file, xpub.encode())[0]
-            if offset != -1:
-                print(f"\taccount xpub({xpub}) found at offset {hex(offset)}")
-                return True
-        
-           
-    return False
-
-def main():
-    parser = argparse.ArgumentParser(description='Process some arguments.')
-    parser.add_argument('-f', '--file', metavar='FILE', type=str, help='Specify target file')
-    parser.add_argument('-w', '--wallet', metavar='WALLET', type=str, help='Specify target wallet')
-    args = parser.parse_args()
-    file_path, wallet = "", ""
-
-    if args.file:
-        file_path=args.file
-    else:
-        print('[-] No target file specified.')
-
-    if args.wallet in ("atomic", "coinomi", "exodus", "green", "guarda", "infinity", "wasabi", "whirlpool"):
-        wallet=args.wallet
-    else:
-        print('[-] Supported Wallet : atomic, coinomi, exodus, green, guarda, infinity, wasabi, whirlpool.')
-
-    if wallet in ("atomic", "exodus", "green", "guarda", "infinity"):
-        extract_mnemonic_regex(file_path)
-    elif wallet == "wasabi":
-        extract_wasabi(file_path)
-    elif wallet == "whirlpool":
-        extract_whirlpool(file_path)
-    elif wallet == "coinomi":
-        extract_coinomi(file_path)
-
-
-if __name__ == "__main__":
-    main()
-
-    
